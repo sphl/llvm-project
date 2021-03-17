@@ -2781,10 +2781,7 @@ bool AddressSanitizer::instrumentFunction(Function &F,
       getInterestingMemoryOperands(&Inst, InterestingOperands);
 
       if (!InterestingOperands.empty()) {
-        if (outputInstrLines) {
-          assert(Inst.hasMetadata() && "Output of ASAN information requires "
-                "debug symbols (i.g. '-g' option)!");
-          
+        if (outputInstrLines && Inst.hasMetadata()) {
           std::vector<std::string> v;
           v.push_back(DEBUG_TYPE);
           v.push_back(F.getSubprogram()->getFilename().str());
