@@ -86,7 +86,6 @@
 #include <iomanip>
 #include <limits>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <tuple>
 
@@ -412,7 +411,7 @@ static cl::opt<int> ClDebugMax("asan-debug-max", cl::desc("Debug max inst"),
                                cl::Hidden, cl::init(-1));
 
 static cl::opt<std::string> ClOutputFile("asan-output-file",
-  cl::desc("Path to the file where X writes the code locations of the "
+  cl::desc("Path to the file where ASan writes the code locations of the "
            "instrumented instructions."),
   cl::Hidden, cl::init(""));
 
