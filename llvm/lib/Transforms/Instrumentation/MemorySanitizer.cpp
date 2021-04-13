@@ -1198,9 +1198,9 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     }
   }
 
-  std::string getInstrLocInfo(Instruction *Inst) {
+  Optional<std::string> getInstrLocInfo(Instruction *Inst) {
     if (!Inst->hasMetadata()) {
-      return "";
+      return None;
     }
 
     Function *F = Inst->getFunction();
@@ -1250,8 +1250,10 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
         storeOrigin(IRB, Addr, Shadow, getOrigin(Val), OriginPtr,
                     OriginAlignment, InstrumentWithCalls);
       
-      if (outputInstrLines) {
-        instrLines.insert(getInstrLocInfo(SI));
+      auto instrInfo = getInstrLocInfo(SI);
+      
+      if (outputInstrLines && instrInfo.hasValue()) {
+        instrLines.insert(instrInfo.getValue());
       }
     }
   }
@@ -1313,8 +1315,10 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
       
       materializeOneCheck(OrigIns, Shadow, Origin, InstrumentWithCalls);
 
-      if (outputInstrLines) {
-        instrLines.insert(getInstrLocInfo(OrigIns));
+      auto instrInfo = getInstrLocInfo(OrigIns);
+      
+      if (outputInstrLines && instrInfo.hasValue()) {
+        instrLines.insert(instrInfo.getValue());
       }
     }
     LLVM_DEBUG(dbgs() << "DONE:\n" << F);
