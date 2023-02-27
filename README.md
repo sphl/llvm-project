@@ -9,6 +9,18 @@ For more information on how to contribute to the LLVM project, please
 take a look at the
 [Contributing to LLVM](https://llvm.org/docs/Contributing.html) guide.
 
+---
+
+## Modification: Extracting ASan/MSan Instrumented Code Lines
+
+This fork includes several modifications to the LLVM project that allow to output the code lines instrumented by AddressSanitizer (ASan) or MemorySanitizer (MSan) during compilation into a CSV file.
+
+For this, first specify the path to the output file via the corresponding environment variable, i.e., `export [ASAN|MSAN]_OUTPUT_FILE=<filepath>`. Then, compile the target program with sanitizer support (`-fsanitize=[address|memory]`) and debug symbols (`-g`).
+
+For each instrumented instruction, the generated CSV file contains a separate row listing (1) the selected sanitizer, (2) the path of the code file, (3) the name of the function, and (4) the line number of the instruction.
+
+---
+
 ## Getting Started with the LLVM System
 
 Taken from https://llvm.org/docs/GettingStarted.html.

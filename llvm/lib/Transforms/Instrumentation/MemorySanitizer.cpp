@@ -197,6 +197,8 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <sstream>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <tuple>
@@ -337,8 +339,13 @@ static cl::opt<uint64_t> ClOriginBase("msan-origin-base",
                                       cl::desc("Define custom MSan OriginBase"),
                                       cl::Hidden, cl::init(0));
 
-static const char *const kMsanModuleCtorName = "msan.module_ctor";
-static const char *const kMsanInitName = "__msan_init";
+static cl::opt<std::string> ClOutputFile("msan-output-file",
+  cl::desc("Path to the file where MSan writes the code locations of the "
+           "instrumented instructions."),
+  cl::Hidden, cl::init(""));
+
+const char kMsanModuleCtorName[] = "msan.module_ctor";
+const char kMsanInitName[] = "__msan_init";
 
 namespace {
 
@@ -1177,21 +1184,49 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     }
   }
 
-  void materializeStores(bool InstrumentWithCalls) {
+  Optional<std::string> getInstrLocInfo(Instruction *Inst) {
+    if (!Inst->hasMetadata()) {
+      return None;
+    }
+
+    Function *F = Inst->getFunction();
+    std::vector<std::string> v;
+
+    v.push_back(DEBUG_TYPE);
+    v.push_back(F->getSubprogram()->getFilename().str());
+    v.push_back(F->getName().str());
+    v.push_back(std::to_string(Inst->getDebugLoc().getLine()));
+
+    std::ostringstream ss;
+
+    std::copy(v.begin(), v.end()-1,
+      std::ostream_iterator<std::string>(ss, ","));
+    ss << *v.rbegin();
+
+    return ss.str();
+  }
+  
+  void materializeStores(bool InstrumentWithCalls, bool outputInstrLines,
+                         std::set<std::string> &instrLines) {
     for (StoreInst *SI : StoreList) {
       IRBuilder<> IRB(SI);
+      
       Value *Val = SI->getValueOperand();
       Value *Addr = SI->getPointerOperand();
       Value *Shadow = SI->isAtomic() ? getCleanShadow(Val) : getShadow(Val);
       Value *ShadowPtr, *OriginPtr;
       Type *ShadowTy = Shadow->getType();
+      
       const Align Alignment = assumeAligned(SI->getAlignment());
       const Align OriginAlignment = std::max(kMinOriginAlignment, Alignment);
+      
       std::tie(ShadowPtr, OriginPtr) =
           getShadowOriginPtr(Addr, IRB, ShadowTy, Alignment, /*isStore*/ true);
 
       StoreInst *NewSI = IRB.CreateAlignedStore(Shadow, ShadowPtr, Alignment);
+      
       LLVM_DEBUG(dbgs() << "  STORE: " << *NewSI << "\n");
+      
       (void)NewSI;
 
       if (SI->isAtomic())
@@ -1200,6 +1235,12 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
       if (MS.TrackOrigins && !SI->isAtomic())
         storeOrigin(IRB, Addr, Shadow, getOrigin(Val), OriginPtr,
                     OriginAlignment, InstrumentWithCalls);
+      
+      auto instrInfo = getInstrLocInfo(SI);
+      
+      if (outputInstrLines && instrInfo.hasValue()) {
+        instrLines.insert(instrInfo.getValue());
+      }
     }
   }
 
@@ -1252,12 +1293,20 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     }
   }
 
-  void materializeChecks(bool InstrumentWithCalls) {
+  void materializeChecks(bool InstrumentWithCalls, bool outputInstrLines,
+                         std::set<std::string> &instrLines) {
     for (const auto &ShadowData : InstrumentationList) {
       Instruction *OrigIns = ShadowData.OrigIns;
       Value *Shadow = ShadowData.Shadow;
       Value *Origin = ShadowData.Origin;
+      
       materializeOneCheck(OrigIns, Shadow, Origin, InstrumentWithCalls);
+
+      auto instrInfo = getInstrLocInfo(OrigIns);
+      
+      if (outputInstrLines && instrInfo.hasValue()) {
+        instrLines.insert(instrInfo.getValue());
+      }
     }
     LLVM_DEBUG(dbgs() << "DONE:\n" << F);
   }
@@ -1286,15 +1335,27 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
                       {Zero, IRB.getInt32(6)}, "retval_origin");
     return ret;
   }
-
+  
   /// Add MemorySanitizer instrumentation to a function.
   bool runOnFunction() {
-    // In the presence of unreachable blocks, we may see Phi nodes with
-    // incoming nodes from such blocks. Since InstVisitor skips unreachable
-    // blocks, such nodes will not have any shadow value associated with them.
-    // It's easier to remove unreachable blocks than deal with missing shadow.
-    removeUnreachableBlocks(F);
+    std::string outputFile;
+    bool outputInstrLines = true;
 
+    if (!ClOutputFile.empty()) {
+      outputFile = ClOutputFile;
+    } else {
+      // When enabling MSAN in Clang we have to specify the output file via the
+      // following environment variable.
+      char *env = std::getenv("MSAN_OUTPUT_FILE");
+
+      if (env) {
+        std::string tmp{env};
+        outputFile = tmp;
+      } else {
+        outputInstrLines = false;
+      }
+    }
+    
     // Iterate all BBs in depth-first order and create shadow instructions
     // for all instructions (where applicable).
     // For PHI nodes we create dummy shadow PHIs which will be finalized later.
@@ -1331,12 +1392,24 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
                                InstrumentationList.size() + StoreList.size() >
                                    (unsigned)ClInstrumentationWithCallThreshold;
 
+    std::set<std::string> instrLines;
+    
     // Insert shadow value checks.
-    materializeChecks(InstrumentWithCalls);
+    materializeChecks(InstrumentWithCalls, outputInstrLines, instrLines);
 
-    // Delayed instrumentation of StoreInst.
-    // This may not add new address checks.
-    materializeStores(InstrumentWithCalls);
+    // Delayed instr. of StoreInst (this may not add new address checks).
+    materializeStores(InstrumentWithCalls, outputInstrLines, instrLines);
+
+    if (outputInstrLines && !instrLines.empty()) {
+      std::ofstream fs;
+      fs.open(outputFile, std::ios_base::app);
+
+      for (auto &line : instrLines) {
+        fs << line << std::endl;
+      }
+
+      fs.close();
+    }
 
     return true;
   }
