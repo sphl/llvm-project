@@ -365,10 +365,13 @@ protected:
   findFunctionSamples(const Instruction &I) const override;
   std::vector<const FunctionSamples *>
   findIndirectCallFunctionSamples(const Instruction &I, uint64_t &Sum) const;
+  mutable DenseMap<const DILocation *, const FunctionSamples *> DILocation2SampleMap;
+  const FunctionSamples *findFunctionSamples(const Instruction &I) const;
   // Attempt to promote indirect call and also inline the promoted call
   bool tryPromoteAndInlineCandidate(
       Function &F, InlineCandidate &Candidate, uint64_t SumOrigin,
-      uint64_t &Sum, SmallVector<CallBase *, 8> *InlinedCallSites = nullptr);
+      uint64_t &Sum, DenseSet<Instruction *> &PromotedInsns,
+      SmallVector<CallBase *, 8> *InlinedCallSites = nullptr);
   bool inlineHotFunctions(Function &F,
                           DenseSet<GlobalValue::GUID> &InlinedGUIDs);
   InlineCost shouldInlineCandidate(InlineCandidate &Candidate);
@@ -387,7 +390,11 @@ protected:
   std::vector<Function *> buildFunctionOrder(Module &M, CallGraph *CG);
   void addCallGraphEdges(CallGraph &CG, const FunctionSamples &Samples);
   void replaceCallGraphEdges(CallGraph &CG, StringMap<Function *> &SymbolMap);
-  void generateMDProfMetadata(Function &F);
+  bool propagateThroughEdges(Function &F, bool UpdateBlockCount);
+  void computeDominanceAndLoopInfo(Function &F);
+  void clearFunctionData();
+  bool callsiteIsHot(const FunctionSamples *CallsiteFS,
+                     ProfileSummaryInfo *PSI);
 
   /// Map from function name to Function *. Used to find the function from
   /// the function name. If the function name contains suffix, additional
@@ -704,139 +711,19 @@ SampleProfileLoader::findFunctionSamples(const Instruction &Inst) const {
   return it.first->second;
 }
 
-/// Check whether the indirect call promotion history of \p Inst allows
-/// the promotion for \p Candidate.
-/// If the profile count for the promotion candidate \p Candidate is
-/// NOMORE_ICP_MAGICNUM, it means \p Candidate has already been promoted
-/// for \p Inst. If we already have at least MaxNumPromotions
-/// NOMORE_ICP_MAGICNUM count values in the value profile of \p Inst, we
-/// cannot promote for \p Inst anymore.
-static bool doesHistoryAllowICP(const Instruction &Inst, StringRef Candidate) {
-  uint32_t NumVals = 0;
-  uint64_t TotalCount = 0;
-  std::unique_ptr<InstrProfValueData[]> ValueData =
-      std::make_unique<InstrProfValueData[]>(MaxNumPromotions);
-  bool Valid =
-      getValueProfDataFromInst(Inst, IPVK_IndirectCallTarget, MaxNumPromotions,
-                               ValueData.get(), NumVals, TotalCount, true);
-  // No valid value profile so no promoted targets have been recorded
-  // before. Ok to do ICP.
-  if (!Valid)
-    return true;
-
-  unsigned NumPromoted = 0;
-  for (uint32_t I = 0; I < NumVals; I++) {
-    if (ValueData[I].Count != NOMORE_ICP_MAGICNUM)
-      continue;
-
-    // If the promotion candidate has NOMORE_ICP_MAGICNUM count in the
-    // metadata, it means the candidate has been promoted for this
-    // indirect call.
-    if (ValueData[I].Value == Function::getGUID(Candidate))
-      return false;
-    NumPromoted++;
-    // If already have MaxNumPromotions promotion, don't do it anymore.
-    if (NumPromoted == MaxNumPromotions)
-      return false;
-  }
-  return true;
-}
-
-/// Update indirect call target profile metadata for \p Inst.
-/// Usually \p Sum is the sum of counts of all the targets for \p Inst.
-/// If it is 0, it means updateIDTMetaData is used to mark a
-/// certain target to be promoted already. If it is not zero,
-/// we expect to use it to update the total count in the value profile.
-static void
-updateIDTMetaData(Instruction &Inst,
-                  const SmallVectorImpl<InstrProfValueData> &CallTargets,
-                  uint64_t Sum) {
-  assert((Sum != 0 || (CallTargets.size() == 1 &&
-                       CallTargets[0].Count == NOMORE_ICP_MAGICNUM)) &&
-         "If sum is 0, assume only one element in CallTargets with count "
-         "being NOMORE_ICP_MAGICNUM");
-
-  uint32_t NumVals = 0;
-  // OldSum is the existing total count in the value profile data.
-  // It will be replaced by Sum if Sum is not 0.
-  uint64_t OldSum = 0;
-  std::unique_ptr<InstrProfValueData[]> ValueData =
-      std::make_unique<InstrProfValueData[]>(MaxNumPromotions);
-  bool Valid =
-      getValueProfDataFromInst(Inst, IPVK_IndirectCallTarget, MaxNumPromotions,
-                               ValueData.get(), NumVals, OldSum, true);
-
-  DenseMap<uint64_t, uint64_t> ValueCountMap;
-  // Initialize ValueCountMap with existing value profile data.
-  if (Valid) {
-    for (uint32_t I = 0; I < NumVals; I++)
-      ValueCountMap[ValueData[I].Value] = ValueData[I].Count;
-  }
-
-  for (const auto &Data : CallTargets) {
-    auto Pair = ValueCountMap.try_emplace(Data.Value, Data.Count);
-    if (Pair.second)
-      continue;
-    // Whenever the count is NOMORE_ICP_MAGICNUM for a value, keep it
-    // in the ValueCountMap. If both the count in CallTargets and the
-    // count in ValueCountMap is not NOMORE_ICP_MAGICNUM, keep the
-    // count in CallTargets.
-    if (Pair.first->second != NOMORE_ICP_MAGICNUM &&
-        Data.Count == NOMORE_ICP_MAGICNUM) {
-      OldSum -= Pair.first->second;
-      Pair.first->second = NOMORE_ICP_MAGICNUM;
-    } else if (Pair.first->second == NOMORE_ICP_MAGICNUM &&
-               Data.Count != NOMORE_ICP_MAGICNUM) {
-      assert(Sum >= Data.Count && "Sum should never be less than Data.Count");
-      Sum -= Data.Count;
-    } else if (Pair.first->second != NOMORE_ICP_MAGICNUM &&
-               Data.Count != NOMORE_ICP_MAGICNUM) {
-      // Sum will be used in this case. Although the existing count
-      // for the current value in value profile will be overriden,
-      // no need to update OldSum.
-      Pair.first->second = Data.Count;
-    }
-  }
-
-  SmallVector<InstrProfValueData, 8> NewCallTargets;
-  for (const auto &ValueCount : ValueCountMap) {
-    NewCallTargets.emplace_back(
-        InstrProfValueData{ValueCount.first, ValueCount.second});
-  }
-
-  llvm::sort(NewCallTargets,
-             [](const InstrProfValueData &L, const InstrProfValueData &R) {
-               if (L.Count != R.Count)
-                 return L.Count > R.Count;
-               return L.Value > R.Value;
-             });
-
-  uint32_t MaxMDCount =
-      std::min(NewCallTargets.size(), static_cast<size_t>(MaxNumPromotions));
-  annotateValueSite(*Inst.getParent()->getParent()->getParent(), Inst,
-                    NewCallTargets, Sum ? Sum : OldSum, IPVK_IndirectCallTarget,
-                    MaxMDCount);
-}
-
 /// Attempt to promote indirect call and also inline the promoted call.
 ///
 /// \param F  Caller function.
 /// \param Candidate  ICP and inline candidate.
 /// \param Sum  Sum of target counts for indirect call.
+/// \param PromotedInsns  Map to keep track of indirect call already processed.
+/// \param Candidate  ICP and inline candidate.
 /// \param InlinedCallSite  Output vector for new call sites exposed after
 /// inlining.
 bool SampleProfileLoader::tryPromoteAndInlineCandidate(
     Function &F, InlineCandidate &Candidate, uint64_t SumOrigin, uint64_t &Sum,
+    DenseSet<Instruction *> &PromotedInsns,
     SmallVector<CallBase *, 8> *InlinedCallSite) {
-  auto CalleeFunctionName = Candidate.CalleeSamples->getFuncName();
-  auto R = SymbolMap.find(CalleeFunctionName);
-  if (R == SymbolMap.end() || !R->getValue())
-    return false;
-
-  auto &CI = *Candidate.CallInstr;
-  if (!doesHistoryAllowICP(CI, R->getValue()->getName()))
-    return false;
-
   const char *Reason = "Callee function not available";
   // R->getValue() != &F is to prevent promoting a recursive call.
   // If it is a recursive call, we do not inline it as it could bloat
@@ -844,17 +731,15 @@ bool SampleProfileLoader::tryPromoteAndInlineCandidate(
   // clone the caller first, and inline the cloned caller if it is
   // recursive. As llvm does not inline recursive calls, we will
   // simply ignore it instead of handling it explicitly.
-  if (!R->getValue()->isDeclaration() && R->getValue()->getSubprogram() &&
+  auto R = SymbolMap.find(Candidate.CalleeSamples->getFuncName());
+  if (R != SymbolMap.end() && R->getValue() &&
+      !R->getValue()->isDeclaration() && R->getValue()->getSubprogram() &&
       R->getValue()->hasFnAttribute("use-sample-profile") &&
-      R->getValue() != &F && isLegalToPromote(CI, R->getValue(), &Reason)) {
-    // For promoted target, set its value with NOMORE_ICP_MAGICNUM count
-    // in the value profile metadata so the target won't be promoted again.
-    SmallVector<InstrProfValueData, 1> SortedCallTargets = {InstrProfValueData{
-        Function::getGUID(R->getValue()->getName()), NOMORE_ICP_MAGICNUM}};
-    updateIDTMetaData(CI, SortedCallTargets, 0);
-
-    auto *DI = &pgo::promoteIndirectCall(
-        CI, R->getValue(), Candidate.CallsiteCount, Sum, false, ORE);
+      R->getValue() != &F &&
+      isLegalToPromote(*Candidate.CallInstr, R->getValue(), &Reason)) {
+    auto *DI =
+        &pgo::promoteIndirectCall(*Candidate.CallInstr, R->getValue(),
+                                  Candidate.CallsiteCount, Sum, false, ORE);
     if (DI) {
       Sum -= Candidate.CallsiteCount;
       // Prorate the indirect callsite distribution.
@@ -863,8 +748,10 @@ bool SampleProfileLoader::tryPromoteAndInlineCandidate(
       // profile will be used to prorate callsites from the callee if
       // inlined. Once not inlined, the direct callsite distribution should
       // be prorated so that the it will reflect the real callsite counts.
-      setProbeDistributionFactor(CI, Candidate.CallsiteDistribution * Sum /
-                                         SumOrigin);
+      setProbeDistributionFactor(*Candidate.CallInstr,
+                                 Candidate.CallsiteDistribution * Sum /
+                                     SumOrigin);
+      PromotedInsns.insert(Candidate.CallInstr);
       Candidate.CallInstr = DI;
       if (isa<CallInst>(DI) || isa<InvokeInst>(DI)) {
         bool Inlined = tryInlineCandidate(Candidate, InlinedCallSite);
@@ -964,7 +851,7 @@ bool SampleProfileLoader::inlineHotFunctions(
             AllCandidates.push_back(CB);
             if (FS->getEntrySamples() > 0 || ProfileIsCS)
               LocalNotInlinedCallSites.try_emplace(CB, FS);
-            if (callsiteIsHot(FS, PSI, ProfAccForSymsInList))
+            if (callsiteIsHot(FS, PSI))
               Hot = true;
             else if (shouldInlineColdCallee(*CB))
               ColdCandidates.push_back(CB);
@@ -1002,7 +889,8 @@ bool SampleProfileLoader::inlineHotFunctions(
             continue;
 
           Candidate = {I, FS, FS->getEntrySamples(), 1.0};
-          if (tryPromoteAndInlineCandidate(F, Candidate, SumOrigin, Sum)) {
+          if (tryPromoteAndInlineCandidate(F, Candidate, SumOrigin, Sum,
+                                           PromotedInsns)) {
             LocalNotInlinedCallSites.erase(I);
             LocalChanged = true;
           }
@@ -1212,6 +1100,7 @@ SampleProfileLoader::shouldInlineCandidate(InlineCandidate &Candidate) {
 
 bool SampleProfileLoader::inlineHotFunctionsWithPriority(
     Function &F, DenseSet<GlobalValue::GUID> &InlinedGUIDs) {
+  DenseSet<Instruction *> PromotedInsns;
   assert(ProfileIsCS && "Prioritiy based inliner only works with CSSPGO now");
 
   // ProfAccForSymsInList is used in callsiteIsHot. The assertion makes sure
@@ -1260,6 +1149,8 @@ bool SampleProfileLoader::inlineHotFunctionsWithPriority(
     if (CalledFunction == &F)
       continue;
     if (I->isIndirectCall()) {
+      if (PromotedInsns.count(I))
+        continue;
       uint64_t Sum;
       auto CalleeSamples = findIndirectCallFunctionSamples(*I, Sum);
       uint64_t SumOrigin = Sum;
@@ -1267,7 +1158,7 @@ bool SampleProfileLoader::inlineHotFunctionsWithPriority(
       for (const auto *FS : CalleeSamples) {
         // TODO: Consider disable pre-lTO ICP for MonoLTO as well
         if (LTOPhase == ThinOrFullLTOPhase::ThinLTOPreLink) {
-          FS->findInlinedFunctions(InlinedGUIDs, F.getParent(), SymbolMap,
+          FS->findInlinedFunctions(InlinedGUIDs, F.getParent(),
                                    PSI->getOrCompHotCountThreshold());
           continue;
         }
@@ -1294,7 +1185,7 @@ bool SampleProfileLoader::inlineHotFunctionsWithPriority(
         Candidate = {I, FS, EntryCountDistributed,
                      Candidate.CallsiteDistribution};
         if (tryPromoteAndInlineCandidate(F, Candidate, SumOrigin, Sum,
-                                         &InlinedCallSites)) {
+                                         PromotedInsns, &InlinedCallSites)) {
           for (auto *CB : InlinedCallSites) {
             if (getInlineCandidate(&NewCandidate, CB))
               CQueue.emplace(NewCandidate);
@@ -1314,8 +1205,7 @@ bool SampleProfileLoader::inlineHotFunctionsWithPriority(
       }
     } else if (LTOPhase == ThinOrFullLTOPhase::ThinLTOPreLink) {
       findCalleeFunctionSamples(*I)->findInlinedFunctions(
-          InlinedGUIDs, F.getParent(), SymbolMap,
-          PSI->getOrCompHotCountThreshold());
+          InlinedGUIDs, F.getParent(), PSI->getOrCompHotCountThreshold());
     }
   }
 
@@ -1331,20 +1221,327 @@ bool SampleProfileLoader::inlineHotFunctionsWithPriority(
   return Changed;
 }
 
-/// Returns the sorted CallTargetMap \p M by count in descending order.
-static SmallVector<InstrProfValueData, 2>
-GetSortedValueDataFromCallTargets(const SampleRecord::CallTargetMap &M) {
-  SmallVector<InstrProfValueData, 2> R;
-  for (const auto &I : SampleRecord::SortCallTargets(M)) {
-    R.emplace_back(
-        InstrProfValueData{FunctionSamples::getGUID(I.first), I.second});
+bool SampleProfileLoader::tryInlineCandidate(
+    InlineCandidate &Candidate, SmallVector<CallBase *, 8> *InlinedCallSites) {
+
+  CallBase &CB = *Candidate.CallInstr;
+  Function *CalledFunction = CB.getCalledFunction();
+  assert(CalledFunction && "Expect a callee with definition");
+  DebugLoc DLoc = CB.getDebugLoc();
+  BasicBlock *BB = CB.getParent();
+
+  InlineCost Cost = shouldInlineCandidate(Candidate);
+  if (Cost.isNever()) {
+    ORE->emit(OptimizationRemarkAnalysis(CSINLINE_DEBUG, "InlineFail", DLoc, BB)
+              << "incompatible inlining");
+    return false;
   }
-  return R;
+
+  if (!Cost)
+    return false;
+
+  InlineFunctionInfo IFI(nullptr, GetAC);
+  if (InlineFunction(CB, IFI).isSuccess()) {
+    // The call to InlineFunction erases I, so we can't pass it here.
+    emitInlinedInto(*ORE, DLoc, BB, *CalledFunction, *BB->getParent(), Cost,
+                    true, CSINLINE_DEBUG);
+
+    // Now populate the list of newly exposed call sites.
+    if (InlinedCallSites) {
+      InlinedCallSites->clear();
+      for (auto &I : IFI.InlinedCallSites)
+        InlinedCallSites->push_back(I);
+    }
+
+    if (ProfileIsCS)
+      ContextTracker->markContextSamplesInlined(Candidate.CalleeSamples);
+    ++NumCSInlined;
+
+    // Prorate inlined probes for a duplicated inlining callsite which probably
+    // has a distribution less than 100%. Samples for an inlinee should be
+    // distributed among the copies of the original callsite based on each
+    // callsite's distribution factor for counts accuracy. Note that an inlined
+    // probe may come with its own distribution factor if it has been duplicated
+    // in the inlinee body. The two factor are multiplied to reflect the
+    // aggregation of duplication.
+    if (Candidate.CallsiteDistribution < 1) {
+      for (auto &I : IFI.InlinedCallSites) {
+        if (Optional<PseudoProbe> Probe = extractProbe(*I))
+          setProbeDistributionFactor(*I, Probe->Factor *
+                                             Candidate.CallsiteDistribution);
+      }
+      NumDuplicatedInlinesite++;
+    }
+
+    return true;
+  }
+  return false;
 }
 
-// Generate MD_prof metadata for every branch instruction using the
-// edge weights computed during propagation.
-void SampleProfileLoader::generateMDProfMetadata(Function &F) {
+bool SampleProfileLoader::getInlineCandidate(InlineCandidate *NewCandidate,
+                                             CallBase *CB) {
+  assert(CB && "Expect non-null call instruction");
+
+  if (isa<IntrinsicInst>(CB))
+    return false;
+
+  // Find the callee's profile. For indirect call, find hottest target profile.
+  const FunctionSamples *CalleeSamples = findCalleeFunctionSamples(*CB);
+  if (!CalleeSamples)
+    return false;
+
+  float Factor = 1.0;
+  if (Optional<PseudoProbe> Probe = extractProbe(*CB))
+    Factor = Probe->Factor;
+
+  uint64_t CallsiteCount = 0;
+  ErrorOr<uint64_t> Weight = getBlockWeight(CB->getParent());
+  if (Weight)
+    CallsiteCount = Weight.get();
+  if (CalleeSamples)
+    CallsiteCount = std::max(
+        CallsiteCount, uint64_t(CalleeSamples->getEntrySamples() * Factor));
+
+  *NewCandidate = {CB, CalleeSamples, CallsiteCount, Factor};
+  return true;
+}
+
+InlineCost
+SampleProfileLoader::shouldInlineCandidate(InlineCandidate &Candidate) {
+  std::unique_ptr<InlineAdvice> Advice = nullptr;
+  if (ExternalInlineAdvisor) {
+    Advice = ExternalInlineAdvisor->getAdvice(*Candidate.CallInstr);
+    if (!Advice->isInliningRecommended()) {
+      Advice->recordUnattemptedInlining();
+      return InlineCost::getNever("not previously inlined");
+    }
+    Advice->recordInlining();
+    return InlineCost::getAlways("previously inlined");
+  }
+
+  // Adjust threshold based on call site hotness, only do this for callsite
+  // prioritized inliner because otherwise cost-benefit check is done earlier.
+  int SampleThreshold = SampleColdCallSiteThreshold;
+  if (CallsitePrioritizedInline) {
+    if (Candidate.CallsiteCount > PSI->getHotCountThreshold())
+      SampleThreshold = SampleHotCallSiteThreshold;
+    else if (!ProfileSizeInline)
+      return InlineCost::getNever("cold callsite");
+  }
+
+  Function *Callee = Candidate.CallInstr->getCalledFunction();
+  assert(Callee && "Expect a definition for inline candidate of direct call");
+
+  InlineParams Params = getInlineParams();
+  Params.ComputeFullInlineCost = true;
+  // Checks if there is anything in the reachable portion of the callee at
+  // this callsite that makes this inlining potentially illegal. Need to
+  // set ComputeFullInlineCost, otherwise getInlineCost may return early
+  // when cost exceeds threshold without checking all IRs in the callee.
+  // The acutal cost does not matter because we only checks isNever() to
+  // see if it is legal to inline the callsite.
+  InlineCost Cost = getInlineCost(*Candidate.CallInstr, Callee, Params,
+                                  GetTTI(*Callee), GetAC, GetTLI);
+
+  // Honor always inline and never inline from call analyzer
+  if (Cost.isNever() || Cost.isAlways())
+    return Cost;
+
+      if (i == 0) {
+        // First, visit all predecessor edges.
+        NumTotalEdges = Predecessors[BB].size();
+        for (auto *Pred : Predecessors[BB]) {
+          Edge E = std::make_pair(Pred, BB);
+          TotalWeight += visitEdge(E, &NumUnknownEdges, &UnknownEdge);
+          if (E.first == E.second)
+            SelfReferentialEdge = E;
+        }
+        if (NumTotalEdges == 1) {
+          SingleEdge = std::make_pair(Predecessors[BB][0], BB);
+        }
+      } else {
+        // On the second round, visit all successor edges.
+        NumTotalEdges = Successors[BB].size();
+        for (auto *Succ : Successors[BB]) {
+          Edge E = std::make_pair(BB, Succ);
+          TotalWeight += visitEdge(E, &NumUnknownEdges, &UnknownEdge);
+        }
+        if (NumTotalEdges == 1) {
+          SingleEdge = std::make_pair(BB, Successors[BB][0]);
+        }
+      }
+
+      // After visiting all the edges, there are three cases that we
+      // can handle immediately:
+      //
+      // - All the edge weights are known (i.e., NumUnknownEdges == 0).
+      //   In this case, we simply check that the sum of all the edges
+      //   is the same as BB's weight. If not, we change BB's weight
+      //   to match. Additionally, if BB had not been visited before,
+      //   we mark it visited.
+      //
+      // - Only one edge is unknown and BB has already been visited.
+      //   In this case, we can compute the weight of the edge by
+      //   subtracting the total block weight from all the known
+      //   edge weights. If the edges weight more than BB, then the
+      //   edge of the last remaining edge is set to zero.
+      //
+      // - There exists a self-referential edge and the weight of BB is
+      //   known. In this case, this edge can be based on BB's weight.
+      //   We add up all the other known edges and set the weight on
+      //   the self-referential edge as we did in the previous case.
+      //
+      // In any other case, we must continue iterating. Eventually,
+      // all edges will get a weight, or iteration will stop when
+      // it reaches SampleProfileMaxPropagateIterations.
+      if (NumUnknownEdges <= 1) {
+        uint64_t &BBWeight = BlockWeights[EC];
+        if (NumUnknownEdges == 0) {
+          if (!VisitedBlocks.count(EC)) {
+            // If we already know the weight of all edges, the weight of the
+            // basic block can be computed. It should be no larger than the sum
+            // of all edge weights.
+            if (TotalWeight > BBWeight) {
+              BBWeight = TotalWeight;
+              Changed = true;
+              LLVM_DEBUG(dbgs() << "All edge weights for " << BB->getName()
+                                << " known. Set weight for block: ";
+                         printBlockWeight(dbgs(), BB););
+            }
+          } else if (NumTotalEdges == 1 &&
+                     EdgeWeights[SingleEdge] < BlockWeights[EC]) {
+            // If there is only one edge for the visited basic block, use the
+            // block weight to adjust edge weight if edge weight is smaller.
+            EdgeWeights[SingleEdge] = BlockWeights[EC];
+            Changed = true;
+          }
+          Changed = true;
+        }
+      }
+    } else if (CalledFunction && CalledFunction->getSubprogram() &&
+               !CalledFunction->isDeclaration()) {
+      SmallVector<CallBase *, 8> InlinedCallSites;
+      if (tryInlineCandidate(Candidate, &InlinedCallSites)) {
+        for (auto *CB : InlinedCallSites) {
+          if (getInlineCandidate(&NewCandidate, CB))
+            CQueue.emplace(NewCandidate);
+        }
+        Changed = true;
+      }
+      if (UpdateBlockCount && !VisitedBlocks.count(EC) && TotalWeight > 0) {
+        BlockWeights[EC] = TotalWeight;
+        VisitedBlocks.insert(EC);
+        Changed = true;
+      }
+    }
+  }
+
+  return Changed;
+}
+
+/// Build in/out edge lists for each basic block in the CFG.
+///
+/// We are interested in unique edges. If a block B1 has multiple
+/// edges to another block B2, we only add a single B1->B2 edge.
+void SampleProfileLoader::buildEdges(Function &F) {
+  for (auto &BI : F) {
+    BasicBlock *B1 = &BI;
+
+    // Add predecessors for B1.
+    SmallPtrSet<BasicBlock *, 16> Visited;
+    if (!Predecessors[B1].empty())
+      llvm_unreachable("Found a stale predecessors list in a basic block.");
+    for (pred_iterator PI = pred_begin(B1), PE = pred_end(B1); PI != PE; ++PI) {
+      BasicBlock *B2 = *PI;
+      if (Visited.insert(B2).second)
+        Predecessors[B1].push_back(B2);
+    }
+
+    // Add successors for B1.
+    Visited.clear();
+    if (!Successors[B1].empty())
+      llvm_unreachable("Found a stale successors list in a basic block.");
+    for (succ_iterator SI = succ_begin(B1), SE = succ_end(B1); SI != SE; ++SI) {
+      BasicBlock *B2 = *SI;
+      if (Visited.insert(B2).second)
+        Successors[B1].push_back(B2);
+    }
+  }
+}
+
+/// Returns the sorted CallTargetMap \p M by count in descending order.
+static SmallVector<InstrProfValueData, 2> GetSortedValueDataFromCallTargets(
+    const SampleRecord::CallTargetMap & M) {
+  SmallVector<InstrProfValueData, 2> R;
+  for (const auto &I : SampleRecord::SortCallTargets(M)) {
+    R.emplace_back(InstrProfValueData{FunctionSamples::getGUID(I.first), I.second});
+  }
+  return false;
+}
+
+/// Propagate weights into edges
+///
+/// The following rules are applied to every block BB in the CFG:
+///
+/// - If BB has a single predecessor/successor, then the weight
+///   of that edge is the weight of the block.
+///
+/// - If all incoming or outgoing edges are known except one, and the
+///   weight of the block is already known, the weight of the unknown
+///   edge will be the weight of the block minus the sum of all the known
+///   edges. If the sum of all the known edges is larger than BB's weight,
+///   we set the unknown edge weight to zero.
+///
+/// - If there is a self-referential edge, and the weight of the block is
+///   known, the weight for that edge is set to the weight of the block
+///   minus the weight of the other incoming edges to that block (if
+///   known).
+void SampleProfileLoader::propagateWeights(Function &F) {
+  bool Changed = true;
+  unsigned I = 0;
+
+  // If BB weight is larger than its corresponding loop's header BB weight,
+  // use the BB weight to replace the loop header BB weight.
+  for (auto &BI : F) {
+    BasicBlock *BB = &BI;
+    Loop *L = LI->getLoopFor(BB);
+    if (!L) {
+      continue;
+    }
+    BasicBlock *Header = L->getHeader();
+    if (Header && BlockWeights[BB] > BlockWeights[Header]) {
+      BlockWeights[Header] = BlockWeights[BB];
+    }
+  }
+
+  // Before propagation starts, build, for each block, a list of
+  // unique predecessors and successors. This is necessary to handle
+  // identical edges in multiway branches. Since we visit all blocks and all
+  // edges of the CFG, it is cleaner to build these lists once at the start
+  // of the pass.
+  buildEdges(F);
+
+  // Propagate until we converge or we go past the iteration limit.
+  while (Changed && I++ < SampleProfileMaxPropagateIterations) {
+    Changed = propagateThroughEdges(F, false);
+  }
+
+  // The first propagation propagates BB counts from annotated BBs to unknown
+  // BBs. The 2nd propagation pass resets edges weights, and use all BB weights
+  // to propagate edge weights.
+  VisitedEdges.clear();
+  Changed = true;
+  while (Changed && I++ < SampleProfileMaxPropagateIterations) {
+    Changed = propagateThroughEdges(F, false);
+  }
+
+  // The 3rd propagation pass allows adjust annotated BB weights that are
+  // obviously wrong.
+  Changed = true;
+  while (Changed && I++ < SampleProfileMaxPropagateIterations) {
+    Changed = propagateThroughEdges(F, true);
+  }
+
   // Generate MD_prof metadata for every branch instruction using the
   // edge weights computed during propagation.
   LLVM_DEBUG(dbgs() << "\nPropagation complete. Setting branch weights\n");

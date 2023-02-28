@@ -258,23 +258,23 @@ bool ProfiledBinary::dissassembleSymbol(std::size_t SI, ArrayRef<uint8_t> Bytes,
       outs() << "\n";
     }
 
-    if (Disassembled) {
-      const MCInstrDesc &MCDesc = MII->get(Inst.getOpcode());
-      // Populate a vector of the symbolized callsite at this location
-      // We don't need symbolized info for probe-based profile, just use an
-      // empty stack as an entry to indicate a valid binary offset
-      FrameLocationStack SymbolizedCallStack;
-      if (!UsePseudoProbes) {
-        InstructionPointer IP(this, Offset);
-        SymbolizedCallStack = symbolize(IP, true);
-      }
-      Offset2LocStackMap[Offset] = SymbolizedCallStack;
-      // Populate address maps.
-      CodeAddrs.push_back(Offset);
-      if (MCDesc.isCall())
-        CallAddrs.insert(Offset);
-      else if (MCDesc.isReturn())
-        RetAddrs.insert(Offset);
+    const MCInstrDesc &MCDesc = MII->get(Inst.getOpcode());
+
+    // Populate a vector of the symbolized callsite at this location
+    // We don't need symbolized info for probe-based profile, just use an empty
+    // stack as an entry to indicate a valid binary offset
+    FrameLocationStack SymbolizedCallStack;
+    if (!UsePseudoProbes) {
+      InstructionPointer IP(this, Offset);
+      SymbolizedCallStack = symbolize(IP, true);
+    }
+    Offset2LocStackMap[Offset] = SymbolizedCallStack;
+    // Populate address maps.
+    CodeAddrs.push_back(Offset);
+    if (MCDesc.isCall())
+      CallAddrs.insert(Offset);
+    else if (MCDesc.isReturn())
+      RetAddrs.insert(Offset);
 
       if (InvalidInstLength) {
         WarnInvalidInsts(Offset - InvalidInstLength, Offset - 1);
@@ -286,9 +286,6 @@ bool ProfiledBinary::dissassembleSymbol(std::size_t SI, ArrayRef<uint8_t> Bytes,
 
     Offset += Size;
   }
-
-  if (InvalidInstLength)
-    WarnInvalidInsts(Offset - InvalidInstLength, Offset - 1);
 
   if (ShowDisassemblyOnly)
     outs() << "\n";

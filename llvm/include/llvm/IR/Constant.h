@@ -217,23 +217,9 @@ public:
   /// changes are made, the constant C is returned.
   static Constant *mergeUndefsWith(Constant *C, Constant *Other);
 
-private:
-  enum PossibleRelocationsTy {
-    /// This constant requires no relocations. That is, it holds simple
-    /// constants (like integrals).
-    NoRelocation = 0,
-
-    /// This constant holds static relocations that can be resolved by the
-    /// static linker.
-    LocalRelocation = 1,
-
-    /// This constant holds dynamic relocations that the dynamic linker will
-    /// need to resolve.
-    GlobalRelocation = 2,
-  };
-
-  /// Determine what potential relocations may be needed by this constant.
-  PossibleRelocationsTy getRelocationInfo() const;
+  /// Return true if a constant is ConstantData or a ConstantAggregate or
+  /// ConstantExpr that contain only ConstantData.
+  bool isManifestConstant() const;
 };
 
 } // end namespace llvm

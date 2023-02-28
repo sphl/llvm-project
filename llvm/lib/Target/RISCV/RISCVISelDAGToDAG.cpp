@@ -488,11 +488,18 @@ void RISCVDAGToDAGISel::Select(SDNode *Node) {
           VLMul, VSEW, /*TailAgnostic*/ true, /*MaskAgnostic*/ false);
       SDValue VTypeIOp = CurDAG->getTargetConstant(VTypeI, DL, XLenVT);
 
-      SDValue VLOperand;
-      if (VLMax) {
-        VLOperand = CurDAG->getRegister(RISCV::X0, XLenVT);
-      } else {
-        VLOperand = Node->getOperand(2);
+      SDValue VLOperand = Node->getOperand(2);
+      if (auto *C = dyn_cast<ConstantSDNode>(VLOperand)) {
+        uint64_t AVL = C->getZExtValue();
+        if (isUInt<5>(AVL)) {
+          SDValue VLImm = CurDAG->getTargetConstant(AVL, DL, XLenVT);
+          ReplaceNode(Node,
+                      CurDAG->getMachineNode(RISCV::PseudoVSETIVLI, DL, XLenVT,
+                                             MVT::Other, VLImm, VTypeIOp,
+                                             /* Chain */ Node->getOperand(0)));
+          return;
+        }
+      }
 
         if (auto *C = dyn_cast<ConstantSDNode>(VLOperand)) {
           uint64_t AVL = C->getZExtValue();
@@ -1087,83 +1094,6 @@ bool RISCVDAGToDAGISel::selectShiftMask(SDValue N, unsigned ShiftWidth,
   // doesn't affect any of those bits.
   if (N.getOpcode() == ISD::AND && isa<ConstantSDNode>(N.getOperand(1))) {
     const APInt &AndMask = N->getConstantOperandAPInt(1);
-
-    // Since the max shift amount is a power of 2 we can subtract 1 to make a
-    // mask that covers the bits needed to represent all shift amounts.
-    assert(isPowerOf2_32(ShiftWidth) && "Unexpected max shift amount!");
-    APInt ShMask(AndMask.getBitWidth(), ShiftWidth - 1);
-
-    if (ShMask.isSubsetOf(AndMask)) {
-      ShAmt = N.getOperand(0);
-      return true;
-    }
-
-    // SimplifyDemandedBits may have optimized the mask so try restoring any
-    // bits that are known zero.
-    KnownBits Known = CurDAG->computeKnownBits(N->getOperand(0));
-    if (ShMask.isSubsetOf(AndMask | Known.Zero)) {
-      ShAmt = N.getOperand(0);
-      return true;
-    }
-  }
-
-  ShAmt = N;
-  return true;
-}
-
-bool RISCVDAGToDAGISel::selectSExti32(SDValue N, SDValue &Val) {
-  if (N.getOpcode() == ISD::SIGN_EXTEND_INREG &&
-      cast<VTSDNode>(N.getOperand(1))->getVT() == MVT::i32) {
-    Val = N.getOperand(0);
-    return true;
-  }
-  // FIXME: Should we just call computeNumSignBits here?
-  if (N.getOpcode() == ISD::AssertSext &&
-      cast<VTSDNode>(N->getOperand(1))->getVT().bitsLE(MVT::i32)) {
-    Val = N;
-    return true;
-  }
-  if (N.getOpcode() == ISD::AssertZext &&
-      cast<VTSDNode>(N->getOperand(1))->getVT().bitsLT(MVT::i32)) {
-    Val = N;
-    return true;
-  }
-
-  return false;
-}
-
-bool RISCVDAGToDAGISel::selectZExti32(SDValue N, SDValue &Val) {
-  if (N.getOpcode() == ISD::AND) {
-    auto *C = dyn_cast<ConstantSDNode>(N.getOperand(1));
-    if (C && CheckAndMask(N.getOperand(0), C, UINT64_C(0xFFFFFFFF))) {
-      Val = N.getOperand(0);
-      return true;
-    }
-  }
-  // FIXME: Should we just call computeKnownBits here?
-  if (N.getOpcode() == ISD::AssertZext &&
-      cast<VTSDNode>(N->getOperand(1))->getVT().bitsLE(MVT::i32)) {
-    Val = N;
-    return true;
-  }
-
-  return false;
-}
-
-// Match (srl (and val, mask), imm) where the result would be a
-// zero-extended 32-bit integer. i.e. the mask is 0xffffffff or the result
-// is equivalent to this (SimplifyDemandedBits may have removed lower bits
-// from the mask that aren't necessary due to the right-shifting).
-bool RISCVDAGToDAGISel::MatchSRLIW(SDNode *N) const {
-  assert(N->getOpcode() == ISD::SRL);
-  assert(N->getOperand(0).getOpcode() == ISD::AND);
-  assert(isa<ConstantSDNode>(N->getOperand(1)));
-  assert(isa<ConstantSDNode>(N->getOperand(0).getOperand(1)));
-
-  // The IsRV64 predicate is checked after PatFrag predicates so we can get
-  // here even on RV32.
-  if (!Subtarget->is64Bit())
-    return false;
 
   SDValue And = N->getOperand(0);
   uint64_t ShAmt = N->getConstantOperandVal(1);

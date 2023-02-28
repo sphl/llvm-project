@@ -2669,48 +2669,6 @@ B func1() { return 42; }
         Code, traverse(TK_IgnoreUnlessSpelledInSource, M),
         std::make_unique<VerifyIdIsBoundTo<Expr>>("allExprs", 1)));
   }
-
-  Code = R"cpp(
-void foo()
-{
-    int arr[3];
-    auto &[f, s, t] = arr;
-
-    f = 42;
-}
-  )cpp";
-  {
-    auto M = bindingDecl(hasName("f"));
-    EXPECT_TRUE(
-        matchesConditionally(Code, traverse(TK_AsIs, M), true, {"-std=c++17"}));
-    EXPECT_TRUE(
-        matchesConditionally(Code, traverse(TK_IgnoreUnlessSpelledInSource, M),
-                             true, {"-std=c++17"}));
-  }
-  {
-    auto M = bindingDecl(hasName("f"), has(expr()));
-    EXPECT_TRUE(
-        matchesConditionally(Code, traverse(TK_AsIs, M), true, {"-std=c++17"}));
-    EXPECT_FALSE(
-        matchesConditionally(Code, traverse(TK_IgnoreUnlessSpelledInSource, M),
-                             true, {"-std=c++17"}));
-  }
-  {
-    auto M = integerLiteral(hasAncestor(bindingDecl(hasName("f"))));
-    EXPECT_TRUE(
-        matchesConditionally(Code, traverse(TK_AsIs, M), true, {"-std=c++17"}));
-    EXPECT_FALSE(
-        matchesConditionally(Code, traverse(TK_IgnoreUnlessSpelledInSource, M),
-                             true, {"-std=c++17"}));
-  }
-  {
-    auto M = declRefExpr(hasAncestor(bindingDecl(hasName("f"))));
-    EXPECT_TRUE(
-        matchesConditionally(Code, traverse(TK_AsIs, M), true, {"-std=c++17"}));
-    EXPECT_FALSE(
-        matchesConditionally(Code, traverse(TK_IgnoreUnlessSpelledInSource, M),
-                             true, {"-std=c++17"}));
-  }
 }
 
 TEST(Traversal, traverseNoImplicit) {
@@ -3011,37 +2969,6 @@ struct CtorInitsNonTrivial : NonTrivial
     EXPECT_TRUE(matches(Code, traverse(TK_AsIs, M)));
     EXPECT_FALSE(matches(Code, traverse(TK_IgnoreUnlessSpelledInSource, M)));
   }
-  {
-    auto M = ifStmt(hasParent(compoundStmt(hasParent(cxxForRangeStmt()))));
-    EXPECT_TRUE(matches(Code, traverse(TK_AsIs, M)));
-    EXPECT_TRUE(matches(Code, traverse(TK_IgnoreUnlessSpelledInSource, M)));
-  }
-  {
-    auto M = cxxForRangeStmt(
-        has(varDecl(hasName("i"), hasParent(cxxForRangeStmt()))));
-    EXPECT_FALSE(matches(Code, traverse(TK_AsIs, M)));
-    EXPECT_TRUE(matches(Code, traverse(TK_IgnoreUnlessSpelledInSource, M)));
-  }
-  {
-    auto M = cxxForRangeStmt(hasDescendant(varDecl(
-        hasName("i"), hasParent(declStmt(hasParent(cxxForRangeStmt()))))));
-    EXPECT_TRUE(matches(Code, traverse(TK_AsIs, M)));
-    EXPECT_FALSE(matches(Code, traverse(TK_IgnoreUnlessSpelledInSource, M)));
-  }
-  {
-    auto M = cxxForRangeStmt(hasRangeInit(declRefExpr(
-        to(varDecl(hasName("arr"))), hasParent(cxxForRangeStmt()))));
-    EXPECT_FALSE(matches(Code, traverse(TK_AsIs, M)));
-    EXPECT_TRUE(matches(Code, traverse(TK_IgnoreUnlessSpelledInSource, M)));
-  }
-
-  {
-    auto M = cxxForRangeStmt(hasRangeInit(declRefExpr(
-        to(varDecl(hasName("arr"))), hasParent(varDecl(hasParent(declStmt(
-                                         hasParent(cxxForRangeStmt()))))))));
-    EXPECT_TRUE(matches(Code, traverse(TK_AsIs, M)));
-    EXPECT_FALSE(matches(Code, traverse(TK_IgnoreUnlessSpelledInSource, M)));
-  }
 
   Code = R"cpp(
   struct Range {
@@ -3138,15 +3065,6 @@ struct CtorInitsNonTrivial : NonTrivial
             hasInitializer(declRefExpr(to(varDecl(hasName("arr"))))))))),
         hasLoopVariable(varDecl(hasName("i"))),
         hasRangeInit(declRefExpr(to(varDecl(hasName("a"))))));
-    EXPECT_TRUE(
-        matchesConditionally(Code, traverse(TK_AsIs, M), true, {"-std=c++20"}));
-    EXPECT_TRUE(
-        matchesConditionally(Code, traverse(TK_IgnoreUnlessSpelledInSource, M),
-                             true, {"-std=c++20"}));
-  }
-  {
-    auto M = cxxForRangeStmt(hasInitStatement(declStmt(
-        hasSingleDecl(varDecl(hasName("a"))), hasParent(cxxForRangeStmt()))));
     EXPECT_TRUE(
         matchesConditionally(Code, traverse(TK_AsIs, M), true, {"-std=c++20"}));
     EXPECT_TRUE(

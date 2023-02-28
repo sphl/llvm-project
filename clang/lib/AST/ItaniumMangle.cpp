@@ -126,7 +126,6 @@ class ItaniumMangleContextImpl : public ItaniumMangleContext {
   llvm::DenseMap<const NamedDecl*, unsigned> Uniquifier;
 
   bool IsDevCtx = false;
-  bool NeedsUniqueInternalLinkageNames = false;
 
 public:
   explicit ItaniumMangleContextImpl(ASTContext &Context,
@@ -139,11 +138,6 @@ public:
   bool shouldMangleCXXName(const NamedDecl *D) override;
   bool shouldMangleStringLiteral(const StringLiteral *) override {
     return false;
-  }
-
-  bool isUniqueInternalLinkageDecl(const NamedDecl *ND) override;
-  void needsUniqueInternalLinkageNames() override {
-    NeedsUniqueInternalLinkageNames = true;
   }
 
   bool isDeviceMangleContext() const override { return IsDevCtx; }
