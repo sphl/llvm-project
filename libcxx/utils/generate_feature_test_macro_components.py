@@ -270,11 +270,6 @@ feature_test_macros = [ add_version_header(x) for x in [
     "depends": "!defined(_LIBCPP_AVAILABILITY_DISABLE_FTM___cpp_lib_filesystem)",
     "internal_depends": "!defined(_LIBCPP_AVAILABILITY_DISABLE_FTM___cpp_lib_filesystem)"
   }, {
-    "name": "__cpp_lib_format",
-    "values": { "c++20": 201907 },
-    "headers": ["format"],
-    "unimplemented": True,
-  }, {
     "name": "__cpp_lib_gcd_lcm",
     "values": { "c++17": 201606 },
     "headers": ["numeric"],

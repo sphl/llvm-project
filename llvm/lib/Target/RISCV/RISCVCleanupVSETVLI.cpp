@@ -120,13 +120,57 @@ bool RISCVCleanupVSETVLI::runOnMachineBasicBlock(MachineBasicBlock &MBB) {
       continue;
     }
 
-    if (isRedundantVSETVLI(MI, PrevVSETVLI)) {
-      // This VSETVLI is redundant, remove it.
-      MI.eraseFromParent();
-      Changed = true;
-    } else {
-      // Otherwise update VSET{I}VLI for the next iteration.
+    // If we don't have a previous VSET{I}VLI or the VL output isn't dead, we
+    // can't remove this VSETVLI.
+    if (!PrevVSETVLI || !MI.getOperand(0).isDead()) {
       PrevVSETVLI = &MI;
+      continue;
+    }
+
+    // If a previous "set vl" instruction opcode is different from this one, we
+    // can't differentiate the AVL values.
+    if (PrevVSETVLI->getOpcode() != MI.getOpcode()) {
+      PrevVSETVLI = &MI;
+      continue;
+    }
+
+    // The remaining two cases are
+    // 1. PrevVSETVLI = PseudoVSETVLI
+    //    MI = PseudoVSETVLI
+    //
+    // 2. PrevVSETVLI = PseudoVSETIVLI
+    //    MI = PseudoVSETIVLI
+    Register AVLReg;
+    bool SameAVL = false;
+    if (MI.getOpcode() == RISCV::PseudoVSETVLI) {
+      AVLReg = MI.getOperand(1).getReg();
+      SameAVL = PrevVSETVLI->getOperand(1).getReg() == AVLReg;
+    } else { // RISCV::PseudoVSETIVLI
+      SameAVL =
+          PrevVSETVLI->getOperand(1).getImm() == MI.getOperand(1).getImm();
+    }
+    int64_t PrevVTYPEImm = PrevVSETVLI->getOperand(2).getImm();
+    int64_t VTYPEImm = MI.getOperand(2).getImm();
+
+    // Does this VSET{I}VLI use the same AVL register/value and VTYPE immediate?
+    if (!SameAVL || PrevVTYPEImm != VTYPEImm) {
+      PrevVSETVLI = &MI;
+      continue;
+    }
+
+    // If the AVLReg is X0 we need to look at the output VL of both VSETVLIs.
+    if ((MI.getOpcode() == RISCV::PseudoVSETVLI) && (AVLReg == RISCV::X0)) {
+      assert((PrevVSETVLI->getOpcode() == RISCV::PseudoVSETVLI) &&
+             "Unexpected vsetvli opcode.");
+      Register PrevOutVL = PrevVSETVLI->getOperand(0).getReg();
+      Register OutVL = MI.getOperand(0).getReg();
+      // We can't remove if the previous VSETVLI left VL unchanged and the
+      // current instruction is setting it to VLMAX. Without knowing the VL
+      // before the previous instruction we don't know if this is a change.
+      if (PrevOutVL == RISCV::X0 && OutVL != RISCV::X0) {
+        PrevVSETVLI = &MI;
+        continue;
+      }
     }
   }
 

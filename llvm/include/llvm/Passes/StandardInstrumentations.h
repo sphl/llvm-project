@@ -401,7 +401,6 @@ class StandardInstrumentations {
   PreservedCFGCheckerInstrumentation PreservedCFGChecker;
   IRChangedPrinter PrintChangedIR;
   PseudoProbeVerifier PseudoProbeVerification;
-  InLineChangePrinter PrintChangedDiff;
   VerifyInstrumentation Verify;
 
   bool VerifyEach;

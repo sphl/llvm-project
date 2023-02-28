@@ -1,5 +1,5 @@
 // RUN: %clang_cc1 -std=c11 -fsyntax-only -verify %s
-// RUN: %clang_cc1 -fms-compatibility -DMS -fsyntax-only -verify=expected,ms %s
+// RUN: %clang_cc1 -fms-compatibility -DMS -fsyntax-only -verify %s
 // RUN: %clang_cc1 -std=c99 -pedantic -fsyntax-only -verify=expected,ext %s
 // RUN: %clang_cc1 -xc++ -std=c++11 -pedantic -fsyntax-only -verify=expected,ext,cxx %s
 
@@ -13,7 +13,7 @@ _Static_assert(0, "0 is nonzero"); // expected-error {{static_assert failed "0 i
                                    // ext-warning {{'_Static_assert' is a C11 extension}}
 
 #ifdef MS
-static_assert(1, "1 is nonzero"); // ms-warning {{use of 'static_assert' without inclusion of <assert.h> is a Microsoft extension}}
+static_assert(1, "1 is nonzero");
 #endif
 
 void foo(void) {
@@ -21,7 +21,7 @@ void foo(void) {
   _Static_assert(0, "0 is nonzero"); // expected-error {{static_assert failed "0 is nonzero"}} \
                                      // ext-warning {{'_Static_assert' is a C11 extension}}
 #ifdef MS
-  static_assert(1, "1 is nonzero"); // ms-warning {{use of 'static_assert' without}}
+  static_assert(1, "1 is nonzero");
 #endif
 }
 
@@ -34,7 +34,7 @@ struct A {
   _Static_assert(0, "0 is nonzero"); // expected-error {{static_assert failed "0 is nonzero"}} \
                                      // ext-warning {{'_Static_assert' is a C11 extension}}
 #ifdef MS
-  static_assert(1, "1 is nonzero"); // ms-warning {{use of 'static_assert' without}}
+  static_assert(1, "1 is nonzero");
 #endif
 };
 

@@ -11,7 +11,6 @@
 #define _LIBCPP_SUPPORT_IBM_XLOCALE_H
 
 #include <__support/ibm/locale_mgmt_aix.h>
-#include <__support/ibm/locale_mgmt_zos.h>
 
 #include "cstdlib"
 

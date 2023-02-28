@@ -166,14 +166,6 @@ static bool setArgsNoUndef(Function &F) {
   return Changed;
 }
 
-static bool setArgNoUndef(Function &F, unsigned ArgNo) {
-  if (F.hasParamAttribute(ArgNo, Attribute::NoUndef))
-    return false;
-  F.addParamAttr(ArgNo, Attribute::NoUndef);
-  ++NumNoUndef;
-  return true;
-}
-
 static bool setRetAndArgsNoUndef(Function &F) {
   return setRetNoUndef(F) | setArgsNoUndef(F);
 }

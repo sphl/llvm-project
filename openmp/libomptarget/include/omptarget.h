@@ -125,37 +125,14 @@ struct __tgt_target_table {
 /// This struct contains information exchanged between different asynchronous
 /// operations for device-dependent optimization and potential synchronization
 struct __tgt_async_info {
-  // A pointer to a queue-like structure where offloading operations are issued.
-  // We assume to use this structure to do synchronization. In CUDA backend, it
-  // is CUstream.
-  void *Queue = nullptr;
-};
-
-struct DeviceTy;
-
-/// The libomptarget wrapper around a __tgt_async_info object directly
-/// associated with a libomptarget layer device. RAII semantics to avoid
-/// mistakes.
-class AsyncInfoTy {
   /// Locations we used in (potentially) asynchronous calls which should live
   /// as long as this AsyncInfoTy object.
   std::deque<void *> BufferLocations;
 
-  __tgt_async_info AsyncInfo;
-  DeviceTy &Device;
-
-public:
-  AsyncInfoTy(DeviceTy &Device) : Device(Device) {}
-  ~AsyncInfoTy() { synchronize(); }
-
-  /// Implicit conversion to the __tgt_async_info which is used in the
-  /// plugin interface.
-  operator __tgt_async_info *() { return &AsyncInfo; }
-
-  /// Synchronize all pending actions.
-  ///
-  /// \returns OFFLOAD_FAIL or OFFLOAD_SUCCESS appropriately.
-  int synchronize();
+  // A pointer to a queue-like structure where offloading operations are issued.
+  // We assume to use this structure to do synchronization. In CUDA backend, it
+  // is CUstream.
+  void *Queue = nullptr;
 
   /// Return a void* reference with a lifetime that is at least as long as this
   /// AsyncInfoTy object. The location can be used as intermediate buffer.
@@ -312,8 +289,10 @@ int __tgt_target_teams_nowait_mapper(
     int32_t thread_limit, int32_t depNum, void *depList, int32_t noAliasDepNum,
     void *noAliasDepList);
 
-void __kmpc_push_target_tripcount(ident_t *loc, int64_t device_id,
-                                  uint64_t loop_tripcount);
+void __kmpc_push_target_tripcount(int64_t device_id, uint64_t loop_tripcount);
+
+void __kmpc_push_target_tripcount_mapper(ident_t *loc, int64_t device_id,
+                                         uint64_t loop_tripcount);
 
 #ifdef __cplusplus
 }

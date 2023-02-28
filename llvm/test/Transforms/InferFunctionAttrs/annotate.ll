@@ -250,7 +250,7 @@ declare void @bcopy(i8*, i8*, i64)
 ; CHECK: declare void @bzero(i8* nocapture writeonly, i64)  [[ARGMEMONLY_NOFREE_NOUNWIND:#[0-9]+]]
 declare void @bzero(i8*, i64)
 
-; CHECK: declare noalias noundef i8* @calloc(i64 noundef, i64 noundef) [[INACCESSIBLEMEMONLY_NOFREE_NOUNWIND_WILLRETURN:#[0-9]+]]
+; CHECK: declare noalias noundef i8* @calloc(i64, i64) [[INACCESSIBLEMEMONLY_NOFREE_NOUNWIND_WILLRETURN:#[0-9]+]]
 declare i8* @calloc(i64, i64)
 
 ; CHECK: declare double @cbrt(double) [[NOFREE_NOUNWIND_WILLRETURN]]
@@ -727,7 +727,7 @@ declare i64 @read(i32, i8*, i64)
 ; CHECK: declare noundef i64 @readlink(i8* nocapture noundef readonly, i8* nocapture noundef, i64 noundef) [[NOFREE_NOUNWIND]]
 declare i64 @readlink(i8*, i8*, i64)
 
-; CHECK: declare noalias noundef i8* @realloc(i8* nocapture, i64 noundef) [[NOUNWIND]]
+; CHECK: declare noalias noundef i8* @realloc(i8* nocapture, i64) [[NOUNWIND]]
 declare i8* @realloc(i8*, i64)
 
 ; CHECK: declare noundef i8* @reallocf(i8*, i64 noundef)

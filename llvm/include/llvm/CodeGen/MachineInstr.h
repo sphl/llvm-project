@@ -1192,7 +1192,7 @@ public:
   bool isPseudoProbe() const {
     return getOpcode() == TargetOpcode::PSEUDO_PROBE;
   }
-
+  
   // True if the instruction represents a position in the function.
   bool isPosition() const { return isLabel() || isCFIInstruction(); }
 

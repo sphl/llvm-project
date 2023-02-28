@@ -669,7 +669,6 @@ std::error_code SampleProfileReaderExtBinaryBase::readFuncProfiles() {
     }
     assert(Data == End && "More data is read than expected");
   } else {
-    // Load function profiles on demand.
     if (Remapper) {
       for (auto Name : FuncsToUse) {
         Remapper->insert(Name);
@@ -702,6 +701,7 @@ std::error_code SampleProfileReaderExtBinaryBase::readFuncProfiles() {
     }
     Data = End;
   }
+
   assert((CSProfileCount == 0 || CSProfileCount == Profiles.size()) &&
          "Cannot have both context-sensitive and regular profile");
   ProfileIsCS = (CSProfileCount > 0);
