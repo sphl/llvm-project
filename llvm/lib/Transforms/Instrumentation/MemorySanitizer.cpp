@@ -1179,23 +1179,22 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
       return;
     }
 
-      unsigned TypeSizeInBits = DL.getTypeSizeInBits(ConvertedShadow->getType());
-      unsigned SizeIndex = TypeSizeToSizeIndex(TypeSizeInBits);
-      if (AsCall && SizeIndex < kNumberOfAccessSizes && !MS.CompileKernel) {
-        FunctionCallee Fn = MS.MaybeStoreOriginFn[SizeIndex];
-        Value *ConvertedShadow2 =
-            IRB.CreateZExt(ConvertedShadow, IRB.getIntNTy(8 * (1 << SizeIndex)));
-        IRB.CreateCall(Fn,
-                       {ConvertedShadow2,
-                        IRB.CreatePointerCast(Addr, IRB.getInt8PtrTy()), Origin});
-      } else {
-        Value *Cmp = convertToBool(ConvertedShadow, IRB, "_mscmp");
-        Instruction *CheckTerm = SplitBlockAndInsertIfThen(
-            Cmp, &*IRB.GetInsertPoint(), false, MS.OriginStoreWeights);
-        IRBuilder<> IRBNew(CheckTerm);
-        paintOrigin(IRBNew, updateOrigin(Origin, IRBNew), OriginPtr, StoreSize,
-                    OriginAlignment);
-      }
+    unsigned TypeSizeInBits = DL.getTypeSizeInBits(ConvertedShadow->getType());
+    unsigned SizeIndex = TypeSizeToSizeIndex(TypeSizeInBits);
+    if (AsCall && SizeIndex < kNumberOfAccessSizes && !MS.CompileKernel) {
+      FunctionCallee Fn = MS.MaybeStoreOriginFn[SizeIndex];
+      Value *ConvertedShadow2 =
+          IRB.CreateZExt(ConvertedShadow, IRB.getIntNTy(8 * (1 << SizeIndex)));
+      IRB.CreateCall(Fn,
+                     {ConvertedShadow2,
+                      IRB.CreatePointerCast(Addr, IRB.getInt8PtrTy()), Origin});
+    } else {
+      Value *Cmp = convertToBool(ConvertedShadow, IRB, "_mscmp");
+      Instruction *CheckTerm = SplitBlockAndInsertIfThen(
+          Cmp, &*IRB.GetInsertPoint(), false, MS.OriginStoreWeights);
+      IRBuilder<> IRBNew(CheckTerm);
+      paintOrigin(IRBNew, updateOrigin(Origin, IRBNew), OriginPtr, StoreSize,
+                  OriginAlignment);
     }
   }
 
