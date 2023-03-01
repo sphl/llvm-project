@@ -81,10 +81,11 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <sstream>
+#include <fstream>
 #include <iomanip>
 #include <limits>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <tuple>
 
@@ -399,6 +400,11 @@ static cl::opt<int> ClDebugMin("asan-debug-min", cl::desc("Debug min inst"),
 
 static cl::opt<int> ClDebugMax("asan-debug-max", cl::desc("Debug max inst"),
                                cl::Hidden, cl::init(-1));
+
+static cl::opt<std::string> ClOutputFile("asan-output-file",
+  cl::desc("Path to the file where ASan writes the code locations of the "
+           "instrumented instructions."),
+  cl::Hidden, cl::init(""));
 
 STATISTIC(NumInstrumentedReads, "Number of instrumented reads");
 STATISTIC(NumInstrumentedWrites, "Number of instrumented writes");
@@ -2676,6 +2682,24 @@ bool AddressSanitizer::instrumentFunction(Function &F,
   if (!ClDebugFunc.empty() && ClDebugFunc == F.getName()) return false;
   if (F.getName().startswith("__asan_")) return false;
 
+  std::string outputFile;
+  bool outputInstrLines = true;
+
+  if (!ClOutputFile.empty()) {
+    outputFile = ClOutputFile;
+  } else {
+    // When enabling ASAN in Clang we have to specify the output file via the
+    // following environment variable.
+    char *env = std::getenv("ASAN_OUTPUT_FILE");
+
+    if (env) {
+      std::string tmp{env};
+      outputFile = tmp;
+    } else {
+      outputInstrLines = false;
+    }
+  }
+  
   bool FunctionModified = false;
 
   // If needed, insert __asan_init before checking for SanitizeAddress attr.
@@ -2684,8 +2708,10 @@ bool AddressSanitizer::instrumentFunction(Function &F,
   if (maybeInsertAsanInitAtFunctionEntry(F))
     FunctionModified = true;
 
-  // Leave if the function doesn't need instrumentation.
-  if (!F.hasFnAttribute(Attribute::SanitizeAddress)) return FunctionModified;
+  if (!outputInstrLines) {
+    // Leave if the function doesn't need instrumentation.
+    if (!F.hasFnAttribute(Attribute::SanitizeAddress)) return FunctionModified;
+  }
 
   LLVM_DEBUG(dbgs() << "ASAN instrumenting:\n" << F << "\n");
 
@@ -2709,6 +2735,8 @@ bool AddressSanitizer::instrumentFunction(Function &F,
   SmallVector<Instruction *, 16> PointerComparisonsOrSubtracts;
   int NumAllocas = 0;
 
+  std::set<std::string> instrLines;
+
   // Fill the set of memory operations to instrument.
   for (auto &BB : F) {
     AllBlocks.push_back(&BB);
@@ -2720,6 +2748,21 @@ bool AddressSanitizer::instrumentFunction(Function &F,
       getInterestingMemoryOperands(&Inst, InterestingOperands);
 
       if (!InterestingOperands.empty()) {
+        if (outputInstrLines && Inst.hasMetadata()) {
+          std::vector<std::string> v;
+          v.push_back(DEBUG_TYPE);
+          v.push_back(F.getSubprogram()->getFilename().str());
+          v.push_back(F.getName().str());
+          v.push_back(std::to_string(Inst.getDebugLoc().getLine()));
+
+          std::ostringstream ss;
+          std::copy(v.begin(), v.end()-1,
+            std::ostream_iterator<std::string>(ss, ","));
+          ss << *v.rbegin();
+
+          instrLines.insert(ss.str());
+        }
+
         for (auto &Operand : InterestingOperands) {
           if (ClOpt && ClOptSameTemp) {
             Value *Ptr = Operand.getPtr();
@@ -2759,6 +2802,17 @@ bool AddressSanitizer::instrumentFunction(Function &F,
       }
       if (NumInsnsPerBB >= ClMaxInsnsToInstrumentPerBB) break;
     }
+  }
+
+  if (outputInstrLines && !instrLines.empty()) {
+    std::ofstream fs;
+    fs.open(outputFile, std::ios_base::app);
+
+    for (auto &line : instrLines) {
+      fs << line << std::endl;
+    }
+
+    fs.close();
   }
 
   bool UseCalls = (ClInstrumentationWithCallsThreshold >= 0 &&
